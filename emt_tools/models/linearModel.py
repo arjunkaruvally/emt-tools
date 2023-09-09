@@ -1,5 +1,5 @@
 import numpy as np
-
+from emt_tools.utils import get_grounded_bases
 
 class LinearModel:
     """
@@ -28,11 +28,15 @@ class LinearModel:
         Convert a simple Elman RNN (no bias), with a linear (without bias) output layer to the LinearModel class.
 
         :param model:
-            pytorch rnn model with RNN module named 'rnn' and output layer named 'output'
+            pytorch rnn model with RNN module named 'rnn' and output layer named 'readout'
         """
-        self.W_uh = model.rnn.weight_ih_l0.detach().numpy()
-        self.W_hh = model.rnn.weight_hh_l0.detach().numpy()
-        self.W_hy = model.output.weight.detach().numpy()
+        self.W_uh = model.rnn.weight_ih_l0.cpu().detach().numpy()
+        self.W_hh = model.rnn.weight_hh_l0.cpu().detach().numpy()
+        self.W_hy = model.readout.weight.cpu().detach().numpy()
 
-
+    def get_variable_basis(self, s, alpha=1, f_operator=None):
+        """
+        Get the variable basis for the linear model.
+        """
+        return get_grounded_bases(self.W_uh, self.W_hh, self.W_hy, s, alpha=alpha, f_operator=f_operator)
 
