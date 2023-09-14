@@ -1,11 +1,13 @@
 import numpy as np
-from emt_tools.utils import get_grounded_bases
+from emt_tools.utils import get_grounded_bases, plot_evolution_in_bases
+
 
 class LinearModel:
     """
     EMT currently is limited to linear models.
     This class can be used to convert usual non-linear RNNs to an equivalent linear model.
     """
+
     def __init__(self, task_dimension, hidden_dimension):
         """
         Constructor for the LinearModel class.
@@ -34,9 +36,13 @@ class LinearModel:
         self.W_hh = model.rnn.weight_hh_l0.cpu().detach().numpy()
         self.W_hy = model.readout.weight.cpu().detach().numpy()
 
-    def get_variable_basis(self, s, alpha=1, f_operator=None):
+    def get_variable_basis(self, s, alpha=1, f_operator=None, strength=1):
         """
         Get the variable basis for the linear model.
         """
-        return get_grounded_bases(self.W_uh, self.W_hh, self.W_hy, s, alpha=alpha, f_operator=f_operator)
+        return get_grounded_bases(self.W_uh, self.W_hh, self.W_hy, s, alpha=alpha,
+                                  f_operator=f_operator, strength=strength)
 
+    def plot_evolution_basis(self, u_history, h_history, y_history, Psi_star, Phi, task_dimension, s,
+                             filename="animation.gif"):
+        plot_evolution_in_bases(u_history, h_history, y_history, Psi_star, Phi, task_dimension, s, filename=filename)
