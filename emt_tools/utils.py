@@ -8,9 +8,24 @@ from matplotlib.patches import Circle, FancyBboxPatch
 from matplotlib.collections import PatchCollection
 import networkx as nx
 import matplotlib.animation
+from sklearn.decomposition import PCA
+
+def pinv(A, rcond=1e-15):
+    """
+    Compute the pseudo-inverse of a matrix
+    """
+    U, S, Vh = np.linalg.svd(A, full_matrices=False)
+    # Sinv = np.zeros_like(A, dtype=float)
+    Sinv = np.diag(np.where(S > rcond, 1.0 / S, 0))
+
+    print(Vh.shape, S.shape, U.shape)
+    Vh = np.matrix(Vh)
+    U = np.matrix(U)
+    Sinv = np.matrix(Sinv)
+    return Vh.H @ Sinv @ U.H
 
 
-def get_grounded_bases(W_uh, W_hh, W_hy, s, alpha=1, h_simulated=None, f_operator=None, strength=1):
+def get_grounded_bases(task_dimension, hidden_dim, W_hh, W_hy, s, alpha=1, h_simulated=None, f_operator=None, strength=1, threshold=0.8):
     """
     Runs the variable memory computation algorithm grounding the hidden state with input
 
@@ -33,86 +48,111 @@ def get_grounded_bases(W_uh, W_hh, W_hy, s, alpha=1, h_simulated=None, f_operato
 
     # get dimensions
 
-    hidden_dim, task_dimension = W_uh.shape
+    W_uh = pinv(W_hy)  # ground on W_hy instead of W_uh
 
-    W_uh = W_hy.T @ np.linalg.inv(W_hy @ W_hy.T)
-
-    W_hy_star = np.linalg.pinv(W_hy)
     original_s = s
 
-    # # reduce dimensionality of W_hh by removing directions with <1 magnitude eigenvalues
-    # W_hh_original = W_hh.copy()
-    # eig_vals, eig_vecs = np.linalg.eig(W_hh)
-    # eigvals_matrix = np.diag(eig_vals)
-    # eigvals_matrix[np.absolute(eigvals_matrix) < 1] = 0
-    # W_hh = eig_vecs @ eigvals_matrix @ np.linalg.inv(eig_vecs)
+    eig_vals, eig_vecs = np.linalg.eig(W_hh)
+    eig_vecs_inv = np.linalg.inv(eig_vecs)
 
-    Psi = [W_uh]  # note that Psi is reversed list of variable memories
+    transient_basis = eig_vecs[:, np.absolute(eig_vals) < threshold]
+    transient_inv_basis = eig_vecs_inv[np.absolute(eig_vals) < threshold, :]
 
-    for k in range(s - 1, 0, -1):
-        Psi.append(np.linalg.matrix_power(W_hh, strength*s - k) @ W_uh)
+    lt_basis = eig_vecs[:, np.absolute(eig_vals) >= threshold]
+    lt_inv_basis = eig_vecs_inv[np.absolute(eig_vals) >= threshold, :]
+
+    # print(transient_inv_basis @ transient_basis)
+    # plt.show()
+
+    # compute the variable memory basis
+    Psi = []
+    indices_to_add = []
+    for k in range(s, 0, -1):
+        if s-k == 0:
+            Psi.append(W_uh)
+        else:
+            Psi.append(np.linalg.matrix_power(W_hh, strength * s - k) @ W_uh)
+
+        Psi[-1] = Psi[-1] / np.linalg.norm(Psi[-1], axis=0).reshape((1, -1))  # normalize the basis
 
     Psi.reverse()
     Psi = np.concatenate(Psi, axis=1).squeeze()
-    # print(Psi.shape)
 
-    # indices_to_add = np.array(list(range(task_dimension * s)))
-    # optimize the basis (seems like NNs learn a compressed basis)
-    if f_operator is not None:
-        if torch.is_tensor(f_operator):
-            f_operator = f_operator.cpu().detach().numpy()
+    ### optimize the basis by reducing the rank of Psi (seems like NNs learn a compressed basis)
+    eig_vals, eig_vecs = np.linalg.eig(W_hh)
+    print("Matrix size: {}".format(W_hh.shape))
+    print("Rank: {}".format(np.sum(np.absolute(eig_vals) > 0.8)))
 
-        indices_array = np.array(list(range(task_dimension))).reshape((-1, 1)) + 1
-        indices_array = (np.abs(f_operator) @ indices_array).flatten()
+    ## construct phi
+    phi = np.eye(s * task_dimension)
+    phi = np.roll(phi, task_dimension)
 
-        indices_to_add = []
+    phi[:, :task_dimension] = 0
+    phi[-task_dimension:, :] = f_operator
 
-        # re-initialize s to the new number of variables
-        raw_indices_array = indices_array.copy()
-        for i in range(s):
-            raw_indices_array[i * task_dimension:(i + 1) * task_dimension] = (((s - i) * task_dimension -
-                                                                               raw_indices_array[i * task_dimension:(
-                                                                                                                            i + 1) * task_dimension]) *
-                                                                              (raw_indices_array[i * task_dimension:(
-                                                                                                                            i + 1) * task_dimension] > 0))  # remove indices not utilized
-        # print(raw_indices_array, np.max(raw_indices_array))
-        s = np.ceil(np.max(raw_indices_array) / task_dimension).astype(np.int_)
+    # compute the nullspace of phi
+    eig_vals, eig_vecs = np.linalg.eig(phi)
 
-        # print("new s: {}".format(s))
+    cur_rank = np.sum(np.absolute(eig_vals) > 0.8)
+    ## reduce the rank of \Phi by removing rows and columns
+    indices_to_add = []
+    psi_projections = []
+    for candidate_dim in range(phi.shape[0]):
+        psi_projections.append(np.linalg.norm(W_hh @ Psi[:, candidate_dim:candidate_dim + 1]))
+        phi_proposal = np.delete(phi, candidate_dim, 0)
+        phi_proposal = np.delete(phi_proposal, candidate_dim, 1)
+        eig_vals_proposal, eig_vecs_proposal = np.linalg.eig(phi_proposal)
 
-        for variable_index in range(s):
-            variable_indices = indices_array[variable_index * task_dimension:(variable_index + 1) * task_dimension]
-            variable_indices = variable_indices[variable_indices > 0]
+        new_rank = np.sum(np.absolute(eig_vals_proposal) > 0.8)
 
-            # print(variable_index, variable_indices - 1)
+        if new_rank < cur_rank:
+            indices_to_add.append(candidate_dim)
+    ### END optimize basis
+    print(indices_to_add)
+    plt.plot(psi_projections, marker="x", linestyle="None")
+    plt.show()
 
-            indices_to_add.append(variable_index * task_dimension + variable_indices.astype(np.int_))
-            if variable_index > 0:
-                indices_to_add[-1] = np.append(indices_to_add[-1], task_dimension + indices_to_add[-2])
-                indices_to_add[-1] = np.unique(indices_to_add[-1])
+    Psi = Psi[:, indices_to_add]
 
-        indices_to_add = np.concatenate(indices_to_add).flatten()
-        indices_to_add -= 1
-
-        # print(indices_to_add)
-        Psi = Psi[:, indices_to_add]
-    else:
-        indices_to_add = np.array(list(range(task_dimension * s)))
-
-    # normalize the basis - TODO: think why no normalization
+    # normalize the basis
     Psi = Psi / np.linalg.norm(Psi, axis=0)
 
     # compute the dual basis
-    Psi_star = np.linalg.inv(Psi.T @ Psi) @ Psi.T
-    # Psi_star = Psi_star / np.linalg.norm(Psi_star, axis=0)
-    # Psi_star = Psi.T @ np.linalg.inv(Psi @ Psi.T)
+    Psi_star = pinv(Psi)
 
     # expanded basis
-    Psi_expanded = np.zeros((hidden_dim, original_s * task_dimension))
-    Psi_star_expanded = np.zeros((original_s * task_dimension, hidden_dim))
+    Psi_expanded = np.zeros((hidden_dim, original_s * task_dimension)).astype('complex128')
+    Psi_star_expanded = np.zeros((original_s * task_dimension, hidden_dim)).astype('complex128')
 
-    Psi_expanded[:, indices_to_add] = Psi
-    Psi_star_expanded[indices_to_add, :] = Psi_star
+    Psi_expanded[:, indices_to_add] += Psi
+    Psi_star_expanded[indices_to_add, :] += Psi_star
+
+    print("shapes")
+    print(h_simulated.shape)
+    print(Psi_star.shape)
+    print(Psi.shape)
+
+    h_orthogonal = h_simulated - (Psi @ Psi_star @ h_simulated.T).T
+    print("horth", h_orthogonal.shape)
+    # compute the orthogonal basis
+    pca = PCA(n_components=10)
+    pca.fit(np.array(h_orthogonal))
+
+    Psi_orthogonal = pca.components_.T
+    Psi_star_orthogonal = Psi_orthogonal.T
+
+    print("psi", Psi_orthogonal.shape)
+
+    Psi_expanded = np.zeros((hidden_dim, original_s * task_dimension + pca.components_.shape[0])).astype('complex128')
+    Psi_star_expanded = np.zeros(Psi_expanded.T.shape).astype('complex128')
+
+    # add memory basis
+    Psi_expanded[:, indices_to_add] += Psi
+    Psi_star_expanded[indices_to_add, :] += Psi_star
+
+    # add orthogonal basis
+    Psi_expanded[:, original_s * task_dimension:] += Psi_orthogonal
+    Psi_star_expanded[original_s * task_dimension:, :] += Psi_star_orthogonal
 
     return Psi_expanded, Psi_star_expanded
 
@@ -132,7 +172,8 @@ def plot_evolution_in_bases(u_history, h_history, y_history, Psi_star, Phi,
     inputstate_y = [-vb_circle_radius - 1 - i * (2 * neuron_radius + neuron_radius // 4) for i in range(task_dimension)]
 
     outputstate_x = [vb_circle_radius + 2.5 * neuron_radius + 1.5] * task_dimension
-    outputstate_y = [-vb_circle_radius - 1 - i * (2 * neuron_radius + neuron_radius // 4) for i in range(task_dimension)]
+    outputstate_y = [-vb_circle_radius - 1 - i * (2 * neuron_radius + neuron_radius // 4) for i in
+                     range(task_dimension)]
 
     radii = [neuron_radius] * (s * task_dimension)
 
@@ -174,8 +215,9 @@ def plot_evolution_in_bases(u_history, h_history, y_history, Psi_star, Phi,
 
     ## add hiddenstate rectangle
     ax.add_patch(FancyBboxPatch((-vb_circle_radius - 0.5, -vb_circle_radius - task_dimension * neuron_radius - 0.5),
-                           2*(vb_circle_radius + 0.5), 2*vb_circle_radius + task_dimension * neuron_radius + 1.5,
-                           color="black", alpha=0.1))
+                                2 * (vb_circle_radius + 0.5),
+                                2 * vb_circle_radius + task_dimension * neuron_radius + 1.5,
+                                color="black", alpha=0.1))
 
     # add these circles to a collection
     p_hstate = PatchCollection(hstate_patches, cmap="coolwarm", alpha=1.0)
@@ -223,38 +265,23 @@ def plot_evolution_in_bases(u_history, h_history, y_history, Psi_star, Phi,
     pass
 
 
-def construct_phi_from_f_operator(f_operator):
-    """
-    Construct the phi from the f_operator
-    :param f_operator: np.ndarray of size (d, sd)
-    :return: np.ndarray of size (sd, sd)
-    """
-    d, sd = f_operator.shape
-    ## construct phi
-    phi = np.eye(sd)
-    phi = np.roll(phi, d)
-
-    phi[:, :d] = 0
-    phi[-d:, :] = f_operator
-
-    return phi
-
-
-def spectral_comparison(operator1, operator2, threshold=1-1e-3):
+def spectral_comparison(operator1, operator2, threshold=0.9):
     """
     Compare the spectral properties of two linear operators.
-    The eigenvalues less than threshold is full removed and the spectrum is compared.
+    The eigenvalues less than threshold is fully removed and the spectrum is compared.
 
     R = \{ (\lamda^1_i, \lambda^2_i) \forall i \in max(|\lambda^1|, |\lambda^2|) \}
     argmin_{R} \sum_{|Arg(\lambda^1_i) - Arg(\lambda^2_i)|}
 
-    :param operator1: np.ndarray
-    :param operator2: np.ndarray
+    :param operator1: np.ndarray (phi)
+    :param operator2: np.ndarray (w_hh)
     :param threshold: float (default 1-1e-3)
     :return:
-
+        avg_error: float
+            If the operators have the same rank and same eigenvalue arguments avg_error->0
+        -1: int
+            If the operators have different ranks
     """
-
     eigenvalues1, eigenvectors1 = np.linalg.eig(operator1)
     eigenvalues2, eigenvectors2 = np.linalg.eig(operator2)
 
@@ -262,15 +289,19 @@ def spectral_comparison(operator1, operator2, threshold=1-1e-3):
     evals1_reduced = eigenvalues1[np.absolute(eigenvalues1) > threshold]
     evals2_reduced = eigenvalues2[np.absolute(eigenvalues2) > threshold]
 
-    # minimum rank operator is operator1
-    if evals1_reduced.shape[0] != evals2_reduced.shape[0]:
-        return -1
+    print(evals1_reduced.shape, evals2_reduced.shape)
+    ## make sure evals2 has atleast evals1 number of evals
+    if evals1_reduced.shape[0] > evals2_reduced.shape[0]:
+        evals2_reduced = np.concatenate((evals2_reduced, np.zeros(evals1_reduced.shape[0] - evals2_reduced.shape[0])))
+    elif evals1_reduced.shape[0] < evals2_reduced.shape[0]:
+        evals1_reduced = np.concatenate((evals1_reduced, np.zeros(evals2_reduced.shape[0] - evals1_reduced.shape[0])))
 
     n = evals1_reduced.shape[0]
+    n2 = evals2_reduced.shape[0]
 
     # compute the spectral distance
     evals1_vec = np.zeros((n, 2))
-    evals2_vec = np.zeros((n, 2))
+    evals2_vec = np.zeros((n2, 2))
 
     evals1_vec[:, 0] = evals1_reduced.real
     evals1_vec[:, 1] = evals1_reduced.imag
@@ -283,7 +314,7 @@ def spectral_comparison(operator1, operator2, threshold=1-1e-3):
     err = 0
     # compute the complex argument error
     for i in range(n):
-        delta = np.arccos((evals1_vec[i:i+1].reshape((1, -1)) @ evals2_vec.T).flatten())
+        delta = np.arccos((evals1_vec[i:i + 1].reshape((1, -1)) @ evals2_vec.T).flatten())
         delta_argmin = np.argmin(np.absolute(delta))
 
         err += np.absolute(delta[delta_argmin])
@@ -291,4 +322,40 @@ def spectral_comparison(operator1, operator2, threshold=1-1e-3):
         # remove the used eigenvalues
         evals2_vec = np.delete(evals2_vec, delta_argmin, axis=0)
 
-    return err/n
+    return err / n
+
+
+def construct_phi_from_operator(f_operator):
+    output_dim, input_dim = f_operator.shape
+    seq_length = output_dim // input_dim
+
+    ## construct phi
+    phi = np.eye(seq_length * input_dim)
+    phi = np.roll(phi, input_dim)
+
+    phi[:, :input_dim] = 0
+    phi[-input_dim:, :] = f_operator.T
+
+    eig_vals, eig_vecs = np.linalg.eig(phi)
+
+    ## The below section compresses the rank of phi by removing irrelevant rows and columns
+    cur_nullspace_rank = np.sum(np.absolute(eig_vals) > 0.8)
+    indices_to_add = []
+    for candidate_dim in range(phi.shape[0]):
+        phi_proposal = np.delete(phi, candidate_dim, 0)
+        phi_proposal = np.delete(phi_proposal, candidate_dim, 1)
+        eig_vals_proposal, eig_vecs_proposal = np.linalg.eig(phi_proposal)
+
+        new_nullspace_rank = np.sum(np.absolute(eig_vals_proposal) > 0.8)
+
+        if new_nullspace_rank < cur_nullspace_rank:
+            indices_to_add.append(candidate_dim)
+
+    basis = np.eye(phi.shape[0])
+
+    for dim in range(basis.shape[0]):
+        if dim not in indices_to_add:
+            basis[dim, :] = 0
+            basis[:, dim] = 0
+
+    return basis @ phi @ basis.T
