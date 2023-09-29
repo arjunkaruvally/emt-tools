@@ -18,7 +18,7 @@ def pinv(A, rcond=1e-15):
     # Sinv = np.zeros_like(A, dtype=float)
     Sinv = np.diag(np.where(S > rcond, 1.0 / S, 0))
 
-    print(Vh.shape, S.shape, U.shape)
+    # print(Vh.shape, S.shape, U.shape)
     Vh = np.matrix(Vh)
     U = np.matrix(U)
     Sinv = np.matrix(Sinv)
@@ -108,9 +108,9 @@ def get_grounded_bases(task_dimension, hidden_dim, W_hh, W_hy, s, alpha=1, h_sim
         if new_rank < cur_rank:
             indices_to_add.append(candidate_dim)
     ### END optimize basis
-    print(indices_to_add)
-    plt.plot(psi_projections, marker="x", linestyle="None")
-    plt.show()
+    # print(indices_to_add)
+    # plt.plot(psi_projections, marker="x", linestyle="None")
+    # plt.show()
 
     Psi = Psi[:, indices_to_add]
 
@@ -127,13 +127,13 @@ def get_grounded_bases(task_dimension, hidden_dim, W_hh, W_hy, s, alpha=1, h_sim
     Psi_expanded[:, indices_to_add] += Psi
     Psi_star_expanded[indices_to_add, :] += Psi_star
 
-    print("shapes")
-    print(h_simulated.shape)
-    print(Psi_star.shape)
-    print(Psi.shape)
+    # print("shapes")
+    # print(h_simulated.shape)
+    # print(Psi_star.shape)
+    # print(Psi.shape)
 
     h_orthogonal = h_simulated - (Psi @ Psi_star @ h_simulated.T).T
-    print("horth", h_orthogonal.shape)
+    # print("horth", h_orthogonal.shape)
     # compute the orthogonal basis
     pca = PCA(n_components=10)
     pca.fit(np.array(h_orthogonal))
@@ -141,7 +141,7 @@ def get_grounded_bases(task_dimension, hidden_dim, W_hh, W_hy, s, alpha=1, h_sim
     Psi_orthogonal = pca.components_.T
     Psi_star_orthogonal = Psi_orthogonal.T
 
-    print("psi", Psi_orthogonal.shape)
+    # print("psi", Psi_orthogonal.shape)
 
     Psi_expanded = np.zeros((hidden_dim, original_s * task_dimension + pca.components_.shape[0])).astype('complex128')
     Psi_star_expanded = np.zeros(Psi_expanded.T.shape).astype('complex128')
